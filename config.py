@@ -1,0 +1,11 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
+WEB3_PROVIDER_URI = os.getenv('WEB3_PROVIDER_URI')
+MONGODB_URI = os.getenv('MONGODB_URI')
+CORE_SCAN_TOKEN = os.getenv('CORE_SCAN_TOKEN')
+SWAP_CONTRACT_ADDRESS = os.getenv('SWAP_CONTRACT_ADDRESS')
+ROUTER_CONTRACT_ADDRESS = os.getenv('ROUTER_CONTRACT_ADDRESS')
