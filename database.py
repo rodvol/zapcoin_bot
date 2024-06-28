@@ -70,11 +70,11 @@ def get_user_private_key(user_id):
     return None
 
 def user_has_wallet(user_id):
-    count = db.wallets.count_documents({'user_id': user_id})
+    count = db.wallets.count_documents({'user_id': user_id, 'enabled': True})
     return count > 0
 
 def get_user_wallet(user_id):
-    result = list(db.wallets.find({'user_id': user_id}))
+    result = list(db.wallets.find({'user_id': user_id, 'enabled': True}))
     if len(result) > 0:
         return result[0]
     else:
@@ -105,3 +105,14 @@ def get_all_settings(user_id):
         initialize_settings(user_id)
         settings = db.settings.find_one({'user_id': user_id})
     return settings
+
+def set_active_wallet(user_id, active_wallet_address):
+    db.wallets.update_many(
+        {"user_id": user_id},
+        {"$set": {"enabled": False}}
+    )
+
+    db.wallets.update_one(
+        {"user_id": user_id, "address": active_wallet_address},
+        {"$set": {"enabled": True}}
+    )

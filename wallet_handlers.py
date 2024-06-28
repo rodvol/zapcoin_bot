@@ -1,10 +1,12 @@
+import qrcode
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CallbackContext
 from web3 import Web3
 from eth_account import Account
-from database import insert_wallet, get_wallet, update_wallet_balance, get_all_wallets, toggle_wallet_enabled, get_user_address, get_user_private_key
+from database import insert_wallet, get_wallet, update_wallet_balance, get_all_wallets, toggle_wallet_enabled, get_user_address, get_user_private_key, get_user_wallet, get_user_address, get_all_wallets, set_active_wallet
 from config import CORE_SCAN_TOKEN, WEB3_PROVIDER_URI
 import requests
+from wallet_management import create_wallet
 import logging
 logging.basicConfig(level=logging.INFO)
 
@@ -28,115 +30,128 @@ def get_transaction_history(address, web3_instance):
     return transactions
 
 async def handle_wallet(update: Update, context: CallbackContext):
-    query = update.callback_query
-    await query.answer()
     user_id = update.effective_user.id
-    # address = get_user_address(user_id)
-    # balance = get_balance(address, web3) / (10 ** 18)
-    address = "0x000"
-    balance = 0
+    wallet = get_user_wallet(user_id)
+    balance = wallet['balance']
+    address = wallet['address']
+
     keyboard = [
-        [InlineKeyboardButton("View on Corescan", callback_data='view_on_solscan')],
-        [InlineKeyboardButton("Close", callback_data='back_to_start')],
-        [InlineKeyboardButton("Deposit CORE", callback_data='deposit_sol')],
-        [InlineKeyboardButton("Withdraw all CORE", callback_data='withdraw_all_sol'), InlineKeyboardButton("Withdraw X CORE", callback_data='withdraw_x_sol')],
-        [InlineKeyboardButton("Reset Wallet", callback_data='reset_wallet'), InlineKeyboardButton("Export Private Key", callback_data='export_private_key')],
+        [InlineKeyboardButton("View on Corescan", url=f"https://scan.coredao.org/address/{address}"), InlineKeyboardButton("Close", callback_data='back_to_start')],
+        [InlineKeyboardButton("Deposit CORE", callback_data='deposit_core')],
+        [InlineKeyboardButton("Withdraw all CORE", callback_data='withdraw_all_core'), InlineKeyboardButton("Withdraw X CORE", callback_data='withdraw_x_core')],
+        [InlineKeyboardButton("Account", callback_data='switch_account')],
+        [InlineKeyboardButton("Export Passphrase", callback_data='export_passphrase'), InlineKeyboardButton("Export Private Key", callback_data='export_private_key')],
+        [InlineKeyboardButton("Create a New Wallet", callback_data='create_new_wallet')],
         [InlineKeyboardButton("Refresh", callback_data='refresh_wallet')]
     ]
+
+    text = (
+        f"Your Wallet:\n\n"
+        f"Address: {address}\n"
+        f"Balance: {balance} CORE\n\n"
+        "Tap to copy the address and send CORE to deposit."
+    )
+
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text(f"Your Wallet:\n\nAddress: {address}\nBalance: {balance:.6f} CORE\n\nTap to copy the address and send SOL to deposit.", reply_markup=reply_markup)
+    await update.callback_query.message.reply_text(text, reply_markup=reply_markup)
 
-async def handle_create_wallet(update: Update, context: CallbackContext):
+async def handle_deposit_core(update: Update, context: CallbackContext):
     query = update.callback_query
-    await query.answer()
     user_id = update.effective_user.id
-    account = Account.create()
-    insert_wallet(user_id, account.address, account._private_key.hex())
-    await query.edit_message_text(f'Wallet created!\nAddress: {account.address}\nPrivate Key: {account._private_key.hex()}', reply_markup=back_markup('wallet'))
+    wallet = get_user_wallet(user_id)
+    address = wallet['address']
 
-async def handle_import_wallet(update: Update, context: CallbackContext):
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text('Please enter the private key of the wallet you want to import:', reply_markup=back_markup('wallet'))
-    context.user_data['import_wallet'] = {'user_id': update.effective_user.id}
+    # Generate QR code for the address
+    img = qrcode.make(address)
+    img_path = f"./qrcodes/{user_id}_qrcode.png"
+    img.save(img_path)
 
-async def handle_check_balance(update: Update, context: CallbackContext):
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text('Please enter the wallet address to check balance:', reply_markup=back_markup('wallet'))
-    context.user_data['check_balance'] = True
+    await query.edit_message_text(f"To Deposit CORE, send CORE to this address: {address}")
+    await query.message.reply_photo(photo=open(img_path, 'rb'))
 
-async def handle_transaction_history(update: Update, context: CallbackContext):
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text('Please enter the wallet address to check transaction history:', reply_markup=back_markup('wallet'))
-    context.user_data['check_history'] = True
+async def handle_withdraw_all_core(update: Update, context: CallbackContext):
+    await update.callback_query.message.reply_text("Paste the Destination Address:")
+    context.user_data['expecting_withdraw_all_address'] = True
 
-async def handle_select_wallet(update: Update, context: CallbackContext):
-    query = update.callback_query
-    await query.answer()
-    user_id = update.effective_user.id
-    wallets = get_all_wallets(user_id)
-    if not wallets:
-        await query.edit_message_text("No wallets found. Please create or import a wallet first.", reply_markup=back_markup('wallet'))
-        return
-
-    keyboard = [[InlineKeyboardButton(wallet['address'], callback_data=f'toggle_{wallet["_id"]}') for wallet in wallets]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text("Select a wallet to toggle its status:", reply_markup=reply_markup)
-
-async def handle_toggle_wallet(update: Update, context: CallbackContext):
-    query = update.callback_query
-    await query.answer()
-    user_id = update.effective_user.id
-    wallet_id = query.data.split('_')[1]
-    toggle_wallet_enabled(user_id, wallet_id)
-    await query.edit_message_text("Wallet status toggled.", reply_markup=back_markup('wallet'))
-
-async def handle_deposit_sol(update: Update, context: CallbackContext):
-    query = update.callback_query
-    await query.answer()
-    address = get_user_address(update.effective_user.id)
-    await query.edit_message_text(f"To deposit SOL, send SOL to this address: {address}\n\nTap to copy the address.", reply_markup=back_markup('wallet'))
-
-async def handle_withdraw_all_sol(update: Update, context: CallbackContext):
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text('Please enter the destination address:', reply_markup=back_markup('wallet'))
-    context.user_data['withdraw_all_sol'] = True
-
-async def handle_withdraw_x_sol(update: Update, context: CallbackContext):
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text('Please enter the destination address:', reply_markup=back_markup('wallet'))
-    context.user_data['withdraw_x_sol'] = True
-
-async def handle_reset_wallet(update: Update, context: CallbackContext):
-    query = update.callback_query
-    await query.answer()
-    user_id = update.effective_user.id
-    wallet = get_wallet(user_id, 'enabled')
-    if wallet:
-        reset_wallet(user_id)
-        await query.edit_message_text("Wallet reset successfully.", reply_markup=back_markup('wallet'))
-    else:
-        await query.edit_message_text("No enabled wallet found to reset.", reply_markup=back_markup('wallet'))
+async def handle_withdraw_x_core(update: Update, context: CallbackContext):
+    await update.callback_query.message.reply_text("Paste the Destination Address:")
+    context.user_data['expecting_withdraw_x_address'] = True
 
 async def handle_export_private_key(update: Update, context: CallbackContext):
-    query = update.callback_query
-    await query.answer()
-    private_key = get_user_private_key(update.effective_user.id)
-    await query.edit_message_text(f"Your Wallet’s Private Key is: {private_key}\n\nPlease don’t share this with anyone as it can put your wallet at risk once shared. Store it in a safe place.", reply_markup=back_markup('wallet'))
+    user_id = update.effective_user.id
+    private_key = get_user_private_key(user_id)
+    await update.callback_query.message.reply_text(
+        f"Your Wallet’s Private Key is: {private_key}. Please don’t share this with anyone as it can put your wallet at risk once shared. Store it in a safe place"
+    )
+
+async def handle_export_passphrase(update: Update, context: CallbackContext):
+    user_id = update.effective_user.id
+    passphrase = "example_passphrase"  # Replace with actual logic to fetch passphrase
+    await update.callback_query.message.reply_text(
+        f"Your Wallet’s Passphrase is: {passphrase}. Please don’t share this with anyone as it can put your wallet at risk once shared. Store it in a safe place"
+    )
+
+async def handle_create_new_wallet(update: Update, context: CallbackContext):
+    user_id = update.effective_user.id
+    wallet = create_wallet(user_id)
+
+    text = (
+        "You need to deposit CORE to your wallet. To start trading, deposit CORE to your Zapcoin Sniping Bot Wallet Address:\n\n"
+        f"{wallet['address']} (tap to Copy)\n\n"
+        "⚠️ Please Copy the Private Key and Passphrase to keep it in a safe place. Without the private key and passphrase you won’t be able to access your assets once lost. "
+        "Additionally, please keep them private and never share them with anyone. We won’t be responsible if you lose your private key and passphrase.\n\n"
+        f"Private Key: {wallet['private_key']} (tap to copy)\n"
+        "Passphrase: <Key> (tap to copy)\n\n"
+        "When you’ve deposited the asset, please make sure to tap on refresh."
+    )
+
+    await update.callback_query.message.reply_text(text)
 
 async def handle_refresh_wallet(update: Update, context: CallbackContext):
-    query = update.callback_query
-    await query.answer()
     user_id = update.effective_user.id
-    address = get_user_address(user_id)
-    balance = get_balance(address, web3) / (10 ** 18)
-    await query.edit_message_text(f"Your Wallet:\n\nAddress: {address}\nBalance: {balance:.6f} CORE\n\nTap to copy the address and send SOL to deposit.", reply_markup=back_markup('wallet'))
+    wallet = get_user_wallet(user_id)
+    balance = wallet['balance']
+    address = wallet['address']
 
-def back_markup(previous_menu):
-    return InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data=previous_menu)]])
+    text = (
+        f"Your Wallet:\n\n"
+        f"Address: {address}\n"
+        f"Balance: {balance} CORE\n\n"
+        "Tap to copy the address and send CORE to deposit."
+    )
+
+    keyboard = [
+        [InlineKeyboardButton("View on Corescan", url=f"https://scan.coredao.org/address/{address}"), InlineKeyboardButton("Close", callback_data='back_to_start')],
+        [InlineKeyboardButton("Deposit CORE", callback_data='deposit_core')],
+        [InlineKeyboardButton("Withdraw all CORE", callback_data='withdraw_all_core'), InlineKeyboardButton("Withdraw X CORE", callback_data='withdraw_x_core')],
+        [InlineKeyboardButton("Account", callback_data='switch_account')],
+        [InlineKeyboardButton("Export Passphrase", callback_data='export_passphrase'), InlineKeyboardButton("Export Private Key", callback_data='export_private_key')],
+        [InlineKeyboardButton("Create a New Wallet", callback_data='create_new_wallet')],
+        [InlineKeyboardButton("Refresh", callback_data='refresh_wallet')]
+    ]
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.edit_message_text(text, reply_markup=reply_markup)
 
 
+async def handle_switch_account(update: Update, context: CallbackContext):
+    user_id = update.effective_user.id
+    wallets = get_all_wallets(user_id)  # Fetch all wallets
+
+    keyboard = []
+    for wallet in wallets:
+        keyboard.append([InlineKeyboardButton(wallet['address'], callback_data=f'switch_to_{wallet["address"]}')])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.edit_message_text("Select the wallet to switch to:", reply_markup=reply_markup)
+
+async def switch_to_account(update: Update, context: CallbackContext):
+    query = update.callback_query
+    user_id = update.effective_user.id
+    wallet_address = query.data.split('_')[-1]
+    wallets = get_all_wallets(user_id)
+    new_active_wallet = next(wallet for wallet in wallets if wallet['address'] == wallet_address)
+    set_active_wallet(user_id, new_active_wallet['address'])
+
+    await query.answer("Switched active wallet.")
+    await handle_wallet(update, context)

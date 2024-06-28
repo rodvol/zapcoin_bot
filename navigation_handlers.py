@@ -1,5 +1,6 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CallbackContext
+from telegram.error import BadRequest 
 from staking_handlers import handle_stake
 from dca_handlers import handle_dca
 from presale_handlers import handle_presale
@@ -15,6 +16,7 @@ from database import get_user_address, get_user_private_key
 from datetime import datetime
 from liquidity_sniping import start_liquidity_sniping_task
 import json
+from decimal import Decimal
 
 logging.basicConfig(level=logging.INFO)
 
@@ -43,16 +45,17 @@ async def handle_start(update: Update, context: CallbackContext):
         wallet = get_user_wallet(user_id)
     else:
         wallet = create_wallet(user_id)
-    
     # Create the keyboard with all buttons
     keyboard = [
-        [InlineKeyboardButton("Buy", callback_data='snipe'), InlineKeyboardButton("Sell & Manage", callback_data='sell_manage')],
+        [InlineKeyboardButton("Buy", callback_data='snipe'), InlineKeyboardButton("Sell & Manage", callback_data='start_sell_manage')],
         [InlineKeyboardButton("Staking", callback_data='staking'), InlineKeyboardButton("DCA", callback_data='dca'), InlineKeyboardButton("Presale Sniping", callback_data='presale')],
         [InlineKeyboardButton("Help", callback_data='help'), InlineKeyboardButton("Wallet", callback_data='wallet'), InlineKeyboardButton("Settings", callback_data='settings')],
         [InlineKeyboardButton("Airdrop", callback_data='airdrop'), InlineKeyboardButton("Pin", callback_data='pin'), InlineKeyboardButton("Refresh", callback_data='refresh')]
     ]
 
-    # Check if the user already has a wallet
+    core_balance = get_wallet_balance(wallet['address'])
+    core_price_usd = Decimal('1.34')
+
     if userhaswallet:
         # User has a wallet, include Refresh button and token input instructions
         text = (
@@ -60,7 +63,7 @@ async def handle_start(update: Update, context: CallbackContext):
             f"CORE Chain’s Leading Sniping Bot to trade any token, built with love for the Coretoshis!\n\n"
             f"Wallet {wallet['address'][-4:]}:\n"
             f"Address: {wallet['address']}\n"
-            f"Balance: {wallet['balance']} CORE\n\n"
+            f"Balance: {core_balance:.2f} CORE - ${core_balance * core_price_usd:.2f}\n\n"
             "📃 Paste the Contract Address of the token you’d like to snipe."
         )
     else:
@@ -106,12 +109,12 @@ async def handle_token_input(update: Update, context: CallbackContext):
         )
         
         keyboard = [
-            [InlineKeyboardButton("View Details", callback_data=f'token_detail_{token_address}')],
-            [InlineKeyboardButton("Back", callback_data='back_to_start')]
+            [InlineKeyboardButton("Trade", callback_data=f'token_detail_{token_address}'), InlineKeyboardButton("Back", callback_data='back_to_start')]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await update.message.reply_text(token_detail_message, reply_markup=reply_markup)
+        message = await update.message.reply_text(token_detail_message, reply_markup=reply_markup)
+        context.user_data['token_message_id'] = message.message_id
         context.user_data['expecting_token_address'] = False
 
 async def handle_token_detail(update: Update, context: CallbackContext):
@@ -121,6 +124,9 @@ async def handle_token_detail(update: Update, context: CallbackContext):
 
     user_id = update.effective_user.id
     settings = get_all_settings(user_id)
+    wallet_address = get_user_address(user_id)
+    core_balance = get_wallet_balance(wallet_address)
+    core_price_usd = Decimal('1.34')
 
     buy_left_value = settings.get('buy_left', '1.0')
     buy_right_value = settings.get('buy_right', '5.0')
@@ -137,22 +143,25 @@ async def handle_token_detail(update: Update, context: CallbackContext):
         f"Net Profit: {token_info['net_profit']}% / {token_info['net_profit_core']} CORE\n"
         f"Initial: {token_info['initial_core']} CORE\n"
         f"Balance: {token_info['balance']} {token_info['symbol']}\n"
-        f"Wallet Balance: {token_info['wallet_balance']} CORE\n\n"
-        "⚠️ You have under 0.005 CORE in your account. Please add more to pay the Core blockchain fee."
+        f"Wallet Balance: {core_balance:.2f} CORE - ${core_balance * core_price_usd:.2f} USD\n\n"
     )
+
+    if core_balance < 1:
+        token_trade_message += "⚠️ You need to have a minimum of 1 CORE in your account to conduct transactions.\n"
 
     keyboard = [
         [InlineKeyboardButton("Home", callback_data='back_to_start'), InlineKeyboardButton("Close", callback_data='close')],
         [InlineKeyboardButton(f"Buy {buy_left_value} CORE", callback_data=f'buy_{token_address}_left'), InlineKeyboardButton(f"Buy {buy_right_value} CORE", callback_data=f'buy_{token_address}_right'), InlineKeyboardButton("Buy X CORE", callback_data=f'buy_{token_address}_x')],
         [InlineKeyboardButton(f"Sell {sell_left_value}%", callback_data=f'sell_{token_address}_left'), InlineKeyboardButton(f"Sell {sell_right_value}%", callback_data=f'sell_{token_address}_right'), InlineKeyboardButton("Sell X%", callback_data=f'sell_{token_address}_x')],
-        [InlineKeyboardButton("Limit Buy", callback_data=f'limit_buy_{token_address}'), InlineKeyboardButton("Limit Sell", callback_data=f'limit_sell_{token_address}')],
-        [InlineKeyboardButton("Explorer", callback_data=f'explorer_{token_address}'), InlineKeyboardButton("Birdeye", callback_data=f'birdeye_{token_address}'), InlineKeyboardButton("Scan", callback_data=f'scan_{token_address}')],
-        [InlineKeyboardButton("Refresh", callback_data=f'refresh_{token_address}')]
+        [InlineKeyboardButton("Limit Buy", callback_data=f'limit_buy_{token_address}'), InlineKeyboardButton("Limit Sell", callback_data=f'limit_sell_{token_address}'), InlineKeyboardButton("Refresh", callback_data=f'refresh_token_{token_address}')],
+        # [InlineKeyboardButton("Explorer", callback_data=f'explorer_{token_address}'), InlineKeyboardButton("Birdeye", callback_data=f'birdeye_{token_address}'), InlineKeyboardButton("Scan", callback_data=f'scan_{token_address}')],
+        # [InlineKeyboardButton("Refresh", callback_data=f'refresh_{token_address}')]
     ]
 
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text(token_trade_message, reply_markup=reply_markup)
 
+    await query.edit_message_text(token_trade_message, reply_markup=reply_markup)
+        
 
 async def handle_trade_action(update: Update, context: CallbackContext):
     query = update.callback_query
@@ -263,27 +272,85 @@ async def handle_help(update: Update, context: CallbackContext):
     await query.edit_message_text("If you’re seeking assistance, please join the Zapcoin Telegram Group and raise your question. An admin will try to help you when they’re online. Moreover, you can go through our White Paper for any technical help.", reply_markup=reply_markup)
 
 async def handle_sell_manage(update: Update, context: CallbackContext):
+    print("handle_sell_manage is called.")
     query = update.callback_query
-    await query.answer()
+    user_id = update.effective_user.id
+
+    print("handle_sell_manage is called.")
+
+    token_positions = get_user_token_positions(user_id)
+
+    positions_message = "Positions Overview:\n\n"
+    for idx, position in enumerate(token_positions, start=1):
+        positions_message += (
+            f"{idx}. {position['token_name']}\n"
+            f"PNL: {position['pnl_percentage']}% / {position['pnl_core']} CORE\n"
+            f"Value: {position['value_core']} CORE / ${position['value_usd']}\n\n"
+        )
+
+    # Add navigation buttons
     keyboard = [
-        [InlineKeyboardButton("Sell 25%", callback_data='sell_25')],
-        [InlineKeyboardButton("Sell 50%", callback_data='sell_50')],
-        [InlineKeyboardButton("Sell 100%", callback_data='sell_100')],
         [InlineKeyboardButton("Back", callback_data='back_to_start')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text("Positions Overview:\n\nNo active positions.", reply_markup=reply_markup)
+
+    await query.edit_message_text(positions_message, reply_markup=reply_markup)
 
 async def handle_pin(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
     await query.edit_message_text(text="Pin functionality coming soon.", reply_markup=back_markup('back_to_start'))
 
-async def handle_refresh(update: Update, context: CallbackContext):
+async def handle_refresh_token(update: Update, context: CallbackContext):
     query = update.callback_query
-    await query.answer()
-    await query.edit_message_text("Your data has been refreshed.", reply_markup=back_markup('back_to_start'))
+    token_address = query.data.split('_')[-1]
+    token_info = await get_token_info(token_address)
 
+    user_id = update.effective_user.id
+    settings = get_all_settings(user_id)
+    wallet_address = get_user_address(user_id)
+    core_balance = get_wallet_balance(wallet_address)
+    core_price_usd = Decimal('1.34')
+
+    buy_left_value = settings.get('buy_left', '1.0')
+    buy_right_value = settings.get('buy_right', '5.0')
+    sell_left_value = settings.get('sell_left', '25')
+    sell_right_value = settings.get('sell_right', '100')
+
+    token_trade_message = (
+        f"${token_info['symbol']} | {token_info['name']} |\n"
+        f"{token_info['address']}\n"
+        f"Profit: {token_info['profit']}% / {token_info['profit_core']} CORE\n"
+        f"Value: ${token_info['value_usd']} / {token_info['value_core']} CORE\n"
+        f"Mcap: ${token_info['market_cap']} @ ${token_info['price']}\n"
+        f"5m: {token_info['5m']}, 1h: {token_info['1h']}, 6h: {token_info['6h']}, 24h: {token_info['24h']}\n"
+        f"Net Profit: {token_info['net_profit']}% / {token_info['net_profit_core']} CORE\n"
+        f"Initial: {token_info['initial_core']} CORE\n"
+        f"Balance: {token_info['balance']} {token_info['symbol']}\n"
+        f"Wallet Balance: {core_balance:.2f} CORE - ${core_balance * core_price_usd:.2f} USD\n\n"
+        f"Last refreshed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+
+    if core_balance < 1:
+        token_trade_message += "⚠️ You need to have a minimum of 1 CORE in your account to conduct transactions.\n"
+
+    keyboard = [
+        [InlineKeyboardButton("Home", callback_data='back_to_start'), InlineKeyboardButton("Close", callback_data='close')],
+        [InlineKeyboardButton(f"Buy {buy_left_value} CORE", callback_data=f'buy_{token_address}_left'), InlineKeyboardButton(f"Buy {buy_right_value} CORE", callback_data=f'buy_{token_address}_right'), InlineKeyboardButton("Buy X CORE", callback_data=f'buy_{token_address}_x')],
+        [InlineKeyboardButton(f"Sell {sell_left_value}%", callback_data=f'sell_{token_address}_left'), InlineKeyboardButton(f"Sell {sell_right_value}%", callback_data=f'sell_{token_address}_right'), InlineKeyboardButton("Sell X%", callback_data=f'sell_{token_address}_x')],
+        [InlineKeyboardButton("Limit Buy", callback_data=f'limit_buy_{token_address}'), InlineKeyboardButton("Limit Sell", callback_data=f'limit_sell_{token_address}'), InlineKeyboardButton("Refresh", callback_data=f'refresh_token_{token_address}')],
+    ]
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    try:
+        await query.edit_message_text(token_trade_message, reply_markup=reply_markup)
+    except BadRequest as e:
+        if "Message is not modified" in str(e):
+            await query.edit_message_text(token_trade_message + " ", reply_markup=reply_markup)
+        else:
+            raise
+        
 def back_markup(previous_menu):
     return InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data=previous_menu)]])
 
@@ -335,21 +402,35 @@ async def handle_buy(update: Update, context: CallbackContext):
         context.user_data['expecting_token_amount'] = True
         await query.edit_message_text("Enter the amount of CORE you’re willing to buy with:", reply_markup=back_markup('token_detail'))
 
+# async def process_buy(update: Update, context: CallbackContext, amount):
+#     query = update.callback_query
+#     token_address = context.user_data.get('token_address')
+#     user_id = update.effective_user.id
+#     try:
+#         tx_hash = await buy_token(get_user_address(user_id), token_address, float(amount), get_user_private_key(user_id))
+#         await query.message.reply_text(
+#             text=f"Bought {amount} tokens for {amount} CORE.\nTransaction Hash: {tx_hash}",
+#             reply_markup=back_markup('token')
+#         )
+#     except Exception as e:
+#         await query.message.reply_text(
+#             text=f"Buying {token_address} worth {amount} CORE\nThe transaction wasn’t executed due to an error. Contact Zapcoin Support if the issue continues in their Telegram Group\nError: {str(e)}",
+#             reply_markup=back_markup('token')
+#         )
+
 async def process_buy(update: Update, context: CallbackContext, amount):
-    query = update.callback_query
-    token_address = context.user_data.get('token_address')
     user_id = update.effective_user.id
+    token_address = context.user_data.get('token_address')
     try:
         tx_hash = await buy_token(get_user_address(user_id), token_address, float(amount), get_user_private_key(user_id))
-        await query.message.reply_text(
-            text=f"Bought {amount} tokens for {amount} CORE.\nTransaction Hash: {tx_hash}",
-            reply_markup=back_markup('token')
-        )
+        message_text = f"Bought {amount} tokens for {amount} CORE.\nTransaction Hash: {tx_hash}"
     except Exception as e:
-        await query.message.reply_text(
-            text=f"Buying {token_address} worth {amount} CORE\nThe transaction wasn’t executed due to an error. Contact Zapcoin Support if the issue continues in their Telegram Group\nError: {str(e)}",
-            reply_markup=back_markup('token')
-        )
+        message_text = f"Buying {token_address} worth {amount} CORE\nThe transaction wasn’t executed due to an error. Contact Zapcoin Support if the issue continues in their Telegram Group\nError: {str(e)}"
+    
+    if update.callback_query:
+        await update.callback_query.message.reply_text(text=message_text, reply_markup=back_markup(f"token_detail_{token_address}"))
+    else:
+        await update.message.reply_text(text=message_text, reply_markup=back_markup(f"token_detail_{token_address}"))
 
 async def buy_token(wallet_address, token_address, amount, private_key):
 
@@ -376,14 +457,15 @@ async def buy_token(wallet_address, token_address, amount, private_key):
     gas_price = web3.eth.gas_price
     amount = 0.01
 
+    amount = float(amount)
     path = [web3.to_checksum_address(WETH_ADDRESS), web3.to_checksum_address(token_address)]
     amountIn = web3.to_wei(amount, 'ether')
     amountsOut = router_contract.functions.getAmountsOut(amountIn, path).call()
     amountOut = amountsOut[1]
     deadline = int(datetime.now().timestamp()) + 60 * 20 
 
-    print(f"buy_token {amountOut} {path} {wallet_address} {deadline}")
-
+    print(f"buy_token {amount} {amountOut} {path} {wallet_address} {deadline}")
+    
     tx = router_contract.functions.swapETHForExactTokens(
         amountOut,
         path,
@@ -438,23 +520,21 @@ async def handle_sell(update: Update, context: CallbackContext):
         await query.edit_message_text("Enter the % of tokens you’re willing to sell:", reply_markup=back_markup('token_detail'))
 
 async def process_sell(update: Update, context: CallbackContext, percentage):
-    query = update.callback_query
-    token_address = context.user_data.get('token_address')
     user_id = update.effective_user.id
+    token_address = context.user_data.get('token_address')
     try:
         tx_hash = await sell_token(get_user_address(user_id), token_address, float(percentage), get_user_private_key(user_id))
-        await query.message.reply_text(
-            text=f"Sold {percentage}% tokens for {token_address}.\nTransaction Hash: {tx_hash}",
-            reply_markup=back_markup('token')
-        )
+        message_text = f"Sold {percentage}% tokens for {token_address}.\nTransaction Hash: {tx_hash}"
     except Exception as e:
-        await query.message.reply_text(
-            text=f"Selling {token_address} worth {percentage}%\nThe transaction wasn’t executed due to an error. Contact Zapcoin Support if the issue continues in their Telegram Group\nError: {str(e)}",
-            reply_markup=back_markup('token')
-        )
+        message_text = f"Selling {token_address} worth {percentage}%\nThe transaction wasn’t executed due to an error. Contact Zapcoin Support if the issue continues in their Telegram Group\nError: {str(e)}"
+    
+    if update.callback_query:
+        await update.callback_query.message.reply_text(text=message_text, reply_markup=back_markup(f'token_detail_{token_address}'))
+    else:
+        await update.message.reply_text(text=message_text, reply_markup=back_markup(f'token_detail_{token_address}'))
 
 async def sell_token(wallet_address, token_address, percentage, private_key):
-    print(f"sell_token {wallet_address} {token_address} {percentage} {private_key}")
+    print(f"sell_token ${percentage} {wallet_address} {token_address} {percentage} {private_key}")
     try:
         token_contract = web3.eth.contract(address=Web3.to_checksum_address(token_address), abi=token_contract_abi)
         token_balance = token_contract.functions.balanceOf(Web3.to_checksum_address(wallet_address)).call()
@@ -479,7 +559,7 @@ async def sell_token(wallet_address, token_address, percentage, private_key):
             'gasPrice': gas_price,
             'chainId': 1116
         })
-
+        
         signed_approve_tx = web3.eth.account.sign_transaction(approve_tx, private_key)
 
         try:
@@ -549,26 +629,8 @@ async def get_token_info(token_address):
     }
 
 def get_wallet_balance(address):
-    # Logic to get the wallet balance
-    pass
-
-async def handle_refresh(update: Update, context: CallbackContext):
-    user_id = update.effective_user.id
-    user_wallet = get_user_wallet(user_id)
-    balance = get_wallet_balance(user_wallet['address'])
-
-    await update.callback_query.answer()
-    await update.callback_query.edit_message_text(
-        text=(
-            f"Zapcoin Sniping Bot\n"
-            f"Wallet {user_wallet['address'][-4:]}\n"
-            f"Address: {user_wallet['address']}\n"
-            f"Balance: {balance} CORE\n\n"
-            "📃 Paste the Contract Address of the token you’d like to snipe"
-        ),
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Refresh", callback_data='refresh')]])
-    )
-    context.user_data['awaiting_token'] = True
+    balance = web3.eth.get_balance(address)
+    return web3.from_wei(balance, 'ether')
 
 async def handle_limit_buy(update: Update, context: CallbackContext):
     query = update.callback_query
@@ -622,3 +684,55 @@ async def snipe_token(update: Update, context: CallbackContext):
 
     await update.message.reply_text(f"Buying {contract_address} worth {core_amount} CORE")
     await update.message.reply_text("Sniping task started. You will be notified once the transaction is complete.")
+
+def get_user_token_positions(user_id):
+    # Placeholder implementation, replace with actual logic to fetch user's token positions
+    return [
+        {
+            'token_name': 'Token A',
+            'pnl_percentage': 10.5,
+            'pnl_core': 0.5,
+            'value_core': 1.5,
+            'value_usd': 150
+        },
+        {
+            'token_name': 'Token B',
+            'pnl_percentage': -5.2,
+            'pnl_core': -0.3,
+            'value_core': 2.0,
+            'value_usd': 200
+        }
+    ]
+
+async def withdraw_core(from_address, to_address, amount, private_key):
+    amount = 0.1
+    amount_in_wei = web3.to_wei(float(amount), 'ether')
+    nonce = web3.eth.get_transaction_count(from_address)
+    gas_price = web3.eth.gas_price
+
+    tx = {
+        'nonce': nonce,
+        'to': to_address,
+        'value': amount_in_wei,
+        'gasPrice': gas_price,
+        'chainId': 1116
+    }
+
+    try:
+        estimated_gas = web3.eth.estimate_gas(tx)
+        tx['gas'] = estimated_gas
+    except Exception as e:
+        raise Exception(f"Estimated Gas: {str(e)}")
+
+    signed_tx = web3.eth.account.sign_transaction(tx, private_key)
+    
+    try:
+        tx_hash = web3.eth.send_raw_transaction(signed_tx.rawTransaction)
+        receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
+
+        if receipt.status != 1:
+            raise Exception(f"Transaction failed with status {receipt.status}")
+
+        return tx_hash.hex()
+    except Exception as e:
+        raise Exception(f"Transaction failed: {str(e)}")
